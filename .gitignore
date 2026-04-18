@@ -1,0 +1,118 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Environment & Secrets
+.env
+.env.*
+*.env
+token.json
+credentials.json
+*.key
+*.pem
+*.p12
+*.pfx
+jarvis_api.token
+
+# Test files
+tests/
+test_*.py
+*_test.py
+pytest.ini
+.pytest_cache/
+.hypothesis/
+htmlcov/
+.coverage
+coverage.xml
+*.cover
+
+# Markdown docs (optional - keeping only README)
+COUNTEREXAMPLES_*.md
+TROUBLESHOOTING*.md
+QUICK_SETUP.md
+HOW_IT_WORKS.md
+SETUP_CHECKLIST.md
+WHATSAPP_FIX_SUMMARY.md
+SERVICES_READY.md
+CURRENT_STATUS.md
+FINAL_STATUS.md
+QUICK_REFERENCE.md
+RESTART_COMPLETE.md
+GOOGLE_SERVICES_FIXED.md
+GMAIL_SUMMARIZATION_IMPROVED.md
+GMAIL_OUTPUT_EXAMPLE.md
+JSON_BASED_SUMMARIZATION.md
+ELECTRON_FIXES.md
+GOOGLE_REAUTH.md
+RESTART_ALL.bat
+TROUBLESHOOTING_GUIDE.md
+test_gmail_routing.py
+reauth_google.ps1
+reauth_google.py
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm/
+.yarn/
+
+# Electron build output
+dist/
+out/
+.webpack/
+
+# WhatsApp auth (sensitive)
+integrations/jarvis-whatsapp-automation/auth/
+
+# Playwright browsers
+.pw-browsers/
+.pw-profiles/
+
+# Temp repos
+.temp_repo/
+.temp_repo2/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Cache
+.cache/
+*.cache
+
+# Windows
+desktop.ini
+$RECYCLE.BIN/
+
+# Wake word model (large binary)
+*.ppn
+
+# Misc
+*.tmp
+*.bak
+*.orig
+preflight_check.py

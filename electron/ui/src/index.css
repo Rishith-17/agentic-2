@@ -1,0 +1,74 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-deep: #070b14;
+  --bg-mid: #0f1626;
+  --accent: #00d7ff;
+  --accent-soft: rgba(0, 215, 255, 0.18);
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    @apply m-0 min-h-screen font-orbitron text-cyan-100;
+    background:
+      radial-gradient(1200px 600px at 100% -20%, rgba(0, 215, 255, 0.12), transparent 60%),
+      radial-gradient(800px 400px at -10% 20%, rgba(15, 185, 129, 0.1), transparent 55%),
+      linear-gradient(155deg, var(--bg-deep), var(--bg-mid));
+  }
+}
+
+@layer components {
+  .bg-grid {
+    background-image:
+      linear-gradient(rgba(0, 215, 255, 0.045) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0, 215, 255, 0.045) 1px, transparent 1px);
+    background-size: 36px 36px;
+  }
+
+  .panel-shell {
+    @apply rounded-2xl border border-cyan-500/25 bg-black/35 p-4 backdrop-blur-xl;
+    box-shadow:
+      0 0 0 1px rgba(0, 215, 255, 0.06) inset,
+      0 16px 35px rgba(1, 8, 19, 0.5);
+  }
+
+  .panel-header {
+    @apply flex flex-wrap items-center justify-between gap-3;
+  }
+
+  .panel-title {
+    @apply inline-flex items-center gap-2 text-sm uppercase tracking-[0.2em] text-cyan-100;
+  }
+
+  .metric-card {
+    @apply rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-3;
+  }
+
+  .metric-label {
+    @apply mb-1 text-[11px] uppercase tracking-[0.18em] text-cyan-300/75;
+  }
+
+  .metric-value {
+    @apply text-sm text-cyan-100;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 7px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(0, 215, 255, 0.05);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 215, 255, 0.28);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 215, 255, 0.4);
+}

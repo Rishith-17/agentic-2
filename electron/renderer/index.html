@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:* https://fonts.googleapis.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com 'self';" />
+  <title>J.A.R.V.I.S.</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700;800&family=Share+Tech+Mono&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="hud-root">
+    <header class="hud-topbar" id="drag-region">
+      <div class="topbar-left">
+        <span class="tb-pill tb-cyan">LOGIC CORE <strong id="logic-pct">--</strong>%</span>
+        <span class="tb-pill tb-purple" id="engine-pill">ENGINE: …</span>
+        <span class="tb-pill tb-dim" id="workspace-pill">WORKSPACE: IDLE</span>
+      </div>
+      <div class="topbar-right">
+        <span class="tb-pill tb-dim" id="data-link">DATA_LINK: OFFLINE</span>
+        <span class="tb-pill tb-protocol">PROTOCOL: ALPHA_SECURE</span>
+        <span class="version">JARVIS_OS // V<span id="os-version">1.4</span></span>
+        <div class="win-controls">
+          <button type="button" id="btn-min" aria-label="Minimize">−</button>
+          <button type="button" id="btn-max" aria-label="Maximize">◻</button>
+          <button type="button" id="btn-close" aria-label="Hide">×</button>
+        </div>
+      </div>
+    </header>
+
+    <div class="hud-body">
+      <aside class="panel panel-comms">
+        <div class="panel-head mono">&gt;_ SYSTEMS COMMS LOG</div>
+        <div class="comms-log mono" id="chat-log" aria-live="polite"></div>
+        <div class="comms-foot mono">
+          <span id="link-foot">LINK: DISCONNECTED</span>
+          <span id="buffer-hint">BUFFER: 0 KB</span>
+        </div>
+      </aside>
+
+      <main class="hud-center">
+        <div class="hud-grid-bg" aria-hidden="true"></div>
+        
+        <!-- New Result Overlay for cards -->
+        <div id="result-overlay" class="result-overlay"></div>
+
+        <div class="hud-visual">
+          <div class="hud-spinner" aria-hidden="true">
+            <div class="ring ring-a"></div>
+            <div class="ring ring-b"></div>
+            <div class="ring ring-c"></div>
+            <div class="ring ring-d"></div>
+            <div class="ring ring-e"></div>
+            <div class="hud-dots"></div>
+            <div class="hud-particles"></div>
+            <div class="hud-scanline"></div>
+          </div>
+          <div class="hud-brand">
+            <h1 class="hud-title">J.A.R.V.I.S.</h1>
+            <p class="hud-sub">* CONNECTED TO MAINFRAME *</p>
+          </div>
+        </div>
+
+        <div class="directive-row">
+          <input type="text" id="input" class="directive-input mono" placeholder="DIRECTIVE INPUT..." autocomplete="off" spellcheck="false" />
+          <button type="button" id="btn-send" class="execute-btn">EXECUTE</button>
+        </div>
+        <div class="directive-meta mono">
+          <span>LINK: ALPHA_SECURE</span>
+          <span>ENCRYPTION: AES-256</span>
+        </div>
+        <div class="directive-extra">
+          <button type="button" id="btn-mic" class="mic-btn mono" title="Voice upload">VOICE INPUT</button>
+          <input type="file" id="audio-file" accept="audio/*" hidden />
+        </div>
+      </main>
+
+      <div class="panel panel-stats">
+          <div class="stats-gauges">
+            <div class="gauge-wrap" data-metric="cpu">
+              <svg class="gauge-svg" viewBox="0 0 100 100" aria-hidden="true">
+                <circle class="gauge-track" cx="50" cy="50" r="38" />
+                <circle class="gauge-fill gauge-cyan" cx="50" cy="50" r="38" id="gauge-cpu-arc" stroke-dasharray="239" stroke-dashoffset="239" />
+              </svg>
+              <span class="gauge-val" id="gauge-cpu-txt">0%</span>
+              <span class="gauge-label mono">CPU</span>
+            </div>
+            <div class="gauge-wrap" data-metric="ram">
+              <svg class="gauge-svg" viewBox="0 0 100 100">
+                <circle class="gauge-track" cx="50" cy="50" r="38" />
+                <circle class="gauge-fill gauge-purple" cx="50" cy="50" r="38" id="gauge-ram-arc" stroke-dasharray="239" stroke-dashoffset="239" />
+              </svg>
+              <span class="gauge-val" id="gauge-ram-txt">0%</span>
+              <span class="gauge-label mono">RAM</span>
+            </div>
+            <div class="gauge-wrap" data-metric="net">
+              <svg class="gauge-svg" viewBox="0 0 100 100">
+                <circle class="gauge-track" cx="50" cy="50" r="38" />
+                <circle class="gauge-fill gauge-net" cx="50" cy="50" r="38" id="gauge-net-arc" stroke-dasharray="239" stroke-dashoffset="239" />
+              </svg>
+              <span class="gauge-val mono" id="gauge-net-txt">0</span>
+              <span class="gauge-label mono">NET</span>
+            </div>
+          </div>
+          <div class="stats-bars mono">
+            <div class="bar-row">
+              <span class="bar-name">CPU FREQ</span>
+              <div class="bar-track"><div class="bar-fill bar-cyan" id="bar-cpu-freq"></div></div>
+              <span class="bar-num" id="txt-cpu-freq">— MHz</span>
+            </div>
+            <div class="bar-row">
+              <span class="bar-name">MEM USED</span>
+              <div class="bar-track"><div class="bar-fill bar-purple" id="bar-mem"></div></div>
+              <span class="bar-num" id="txt-mem">— / — GB</span>
+            </div>
+          </div>
+          <div class="net-io mono">
+            <span>↑ <span id="net-up">0</span> MB</span>
+            <span>↓ <span id="net-down">0</span> MB</span>
+          </div>
+      </div>
+
+      <div class="panel panel-exec">
+          <div class="exec-head">
+            <span class="exec-title mono">EXECUTION CORE</span>
+            <span class="exec-play" aria-hidden="true">▶</span>
+            <span class="exec-ver mono">LOGIC PROCESSOR // V2.5</span>
+          </div>
+          <div class="exec-body" id="execution-core">
+            <div class="exec-spinner" id="exec-spinner" hidden></div>
+            <p class="exec-state mono" id="exec-state">AWAITING DIRECTIVE</p>
+          </div>
+      </div>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
