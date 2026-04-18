@@ -260,35 +260,61 @@ html, body {
   position: absolute;
   top: 20px;
   right: 20px;
-  width: 320px;
+  width: 340px;
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
+  overflow-x: hidden;
   z-index: 1000;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   pointer-events: none;
 }
 
 .result-card {
-  background: rgba(10, 20, 45, 0.9);
+  background: rgba(10, 20, 45, 0.95);
   border: 1px solid var(--cyan);
   border-left: 4px solid var(--cyan);
   border-radius: 8px;
-  padding: 16px;
+  padding: 14px 16px;
   backdrop-filter: blur(15px);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5), 0 0 15px rgba(0, 229, 255, 0.2);
-  animation: slideIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+  animation: slideIn 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
   pointer-events: all;
   position: relative;
   overflow: hidden;
-  max-width: 100%; /* Prevent overflow */
-  word-wrap: break-word; /* Break long words */
+  max-width: 100%;
+  word-wrap: break-word;
+}
+
+/* Countdown progress bar at bottom of card */
+.result-card::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  width: 100%;
+  background: var(--cyan);
+  box-shadow: 0 0 6px var(--cyan);
+  animation: countdown 10s linear forwards;
+}
+
+.result-card.card-confirmation::after,
+.result-card.card-whatsapp::after {
+  display: none;
+}
+
+@keyframes countdown {
+  from { width: 100%; }
+  to   { width: 0%; }
 }
 
 .result-card::before {
   content: "";
   position: absolute;
   top: 0; left: 0; width: 100%; height: 100%;
-  background: repeating-linear-gradient(0deg, transparent, transparent 1px, rgba(0,229,255,0.03) 1px, rgba(0,229,255,0.03) 2px);
+  background: repeating-linear-gradient(0deg, transparent, transparent 1px, rgba(0,229,255,0.02) 1px, rgba(0,229,255,0.02) 2px);
   pointer-events: none;
 }
 

@@ -52,6 +52,7 @@ You must strictly choose ONE of these tools:
 - WEB_AGENT → search, browse, scrape websites
 - PRESENTATION → generate PPT
 - FILE_SHARE → upload and generate share link
+- VISION → capture screen and analyze what user is looking at
 
 ---
 ⚙️ EXECUTION RULE (VERY STRICT)
@@ -78,6 +79,7 @@ You MUST respond ONLY in this JSON format:
 - If user says "create ppt" → PRESENTATION
 - If user says "upload/share file" → FILE_SHARE
 - If user says "calendar", "schedule", "appointment" → GOOGLE_CALENDAR
+- If user says "look at my screen", "what is on my screen", "what is this" → VISION
 
 ---
 ❌ DO NOT
@@ -111,23 +113,16 @@ _VALID_SKILLS = {
     "drive",
     "file_manager",
     "file_share",
-    "food_grocery",
     "gesture_control",
     "gmail",
-    "learning_course_search",
-    "learning_explain",
-    "learning_progress",
-    "learning_study_plan",
     "maps",
     "memory_skill",
     "news",
     "places",
     "presentation",
-    "shopping_deal_finder",
-    "shopping_price_alert",
-    "shopping_price_compare",
     "sheets",
     "system_control",
+    "vision",
     "weather",
     "web_agent",
     "whatsapp",
@@ -234,12 +229,45 @@ def _heuristic_plan(text: str) -> Plan | None:
                 needs_skill=True,
             )
 
-    food_terms = {"order", "food", "grocery", "swiggy", "zomato", "blinkit", "zepto", "biryani", "pizza", "milk"}
-    if any(word in lower for word in food_terms):
+    # Weather heuristics - fast path, no LLM needed
+    weather_terms = {"weather", "temperature", "forecast", "rain", "humidity", "wind", "climate", "hot", "cold", "sunny", "cloudy"}
+    if any(term in lower for term in weather_terms):
+        # Extract city if mentioned
+        city_match = re.search(r"(?:in|for|at)\s+([A-Za-z\s]+?)(?:\s*$|\?|today|tomorrow)", text, re.IGNORECASE)
+        city = city_match.group(1).strip() if city_match else None
+        params = {}
+        if city:
+            params["city"] = city
+        if any(w in lower for w in {"rain", "umbrella", "precipitation"}):
+            action = "rain_alert"
+        elif any(w in lower for w in {"forecast", "week", "tomorrow", "days", "weekly"}):
+            action = "forecast"
+        else:
+            action = "current"
+        return Plan(skill="weather", action=action, parameters=params, reply_text="", needs_skill=True)
+
+    # News heuristics - fast path, no LLM needed
+    news_terms = {"news", "headlines", "latest news", "today's news", "breaking", "current events"}
+    if any(term in lower for term in news_terms):
+        topic_map = {
+            "technology": "technology", "tech": "technology", "ai": "ai",
+            "business": "business", "sports": "sports", "science": "science",
+            "health": "health", "politics": "politics", "entertainment": "entertainment",
+            "india": "india", "world": "world",
+        }
+        topic_found = next((topic_map[w] for w in topic_map if w in lower), None)
+        if topic_found:
+            return Plan(
+                skill="news",
+                action="topic_headlines",
+                parameters={"topic": topic_found, "country": "in"},
+                reply_text="",
+                needs_skill=True,
+            )
         return Plan(
-            skill="food_grocery",
-            action="smart_order",
-            parameters={"query": text},
+            skill="news",
+            action="headlines",
+            parameters={"country": "in"},
             reply_text="",
             needs_skill=True,
         )
@@ -257,14 +285,33 @@ def _heuristic_plan(text: str) -> Plan | None:
     if any(word in lower for word in browser_terms):
         return Plan(skill="web_agent", action="run", parameters={"task": text}, needs_skill=True)
 
+    vision_terms = {"look at my screen", "what is on my screen", "what am i looking at", "analyze this screen", "what is this", "what is that"}
+    if any(term in lower for term in vision_terms):
+        return Plan(skill="vision", action="analyze_screen", parameters={"query": text}, needs_skill=True)
+
+    # Open Aurawave
+    if "aurawave" in lower or "ai based music player" in lower:
+        return Plan(
+            skill="browser_agent",
+            action="open_browser",
+            parameters={"url": "https://www.aurawave-aimusic.in/auth"},
+            needs_skill=True,
+        )
+
+    # Media / music - play on YouTube
     media_terms = {"play song", "play video", "play music", "youtube", "listen to", "watch"}
     if any(term in lower for term in media_terms) or lower.startswith("play "):
-        return Plan(skill="browser_agent", action="youtube_play", parameters={"query": text}, needs_skill=True)
-    
+        query = re.sub(r'^(play|open|start|listen to|watch)\s+', '', lower, flags=re.IGNORECASE).strip()
+        query = re.sub(r'\b(song|video|music|on youtube|please)\b', '', query, flags=re.IGNORECASE).strip() or text
+        return Plan(skill="browser_agent", action="youtube_play", parameters={"query": query}, needs_skill=True)
+
     gesture_terms = {"gesture control", "hand tracking", "gesture tracking", "start gesture", "activate gesture"}
     if any(term in lower for term in gesture_terms):
         return Plan(skill="gesture_control", action="start", parameters={"show_window": True}, needs_skill=True)
-    if "stop gesture" in lower or "disable gesture" in lower:
+    gesture_stop_terms = {"stop gesture", "disable gesture", "stop the gesture", "close gesture",
+                          "turn off gesture", "deactivate gesture", "end gesture", "kill gesture",
+                          "gesture off", "gesture stop", "stop hand tracking", "stop tracking"}
+    if any(term in lower for term in gesture_stop_terms):
         return Plan(skill="gesture_control", action="stop", parameters={}, needs_skill=True)
 
     if lower.startswith("open google"):
@@ -295,11 +342,69 @@ def _heuristic_plan(text: str) -> Plan | None:
             needs_skill=True,
         )
 
+    # Calendar / schedule heuristics
+    calendar_terms = {"schedule", "calendar", "appointment", "meeting", "remind", "event", "agenda"}
+    if any(term in lower for term in calendar_terms):
+        if any(w in lower for w in {"add", "create", "set", "schedule", "book"}):
+            return Plan(skill="calendar", action="create_event", parameters={"text": text}, needs_skill=True)
+        return Plan(skill="calendar", action="list_events", parameters={"text": text}, needs_skill=True)
+
+    # WhatsApp by name (no number given)
+    if any(w in lower for w in {"whatsapp", "send message to", "message to"}) and not re.search(r'\d{10,15}', text):
+        # Extract name and message
+        name_match = re.search(r'(?:to|message)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)', lower)
+        name = name_match.group(1).strip() if name_match else ""
+        msg_match = re.search(r'(?:saying|say|that|message|:)\s+(.+)', lower)
+        msg = msg_match.group(1).strip() if msg_match else ""
+        return Plan(
+            skill="whatsapp",
+            action="send_message",
+            parameters={"contact": name, "message": msg},
+            needs_skill=True,
+        )
+
     # Keep maps routing strict so "app router" does not get misclassified.
     if "map" in lower or "directions" in lower:
         return Plan(skill="maps", action="get_directions", parameters={}, needs_skill=True)
     if "route" in lower and "app router" not in lower and "router" not in lower:
         return Plan(skill="maps", action="get_directions", parameters={}, needs_skill=True)
+
+    # General conversational Q&A — ONLY fire if none of the above skills match
+    # Strict list: must start with these exact patterns and NOT contain skill keywords
+    skill_guard = calendar_terms | weather_terms | news_terms | {"whatsapp", "play", "open", "search", "map", "route"}
+    pure_qa_starters = {"what is", "what are", "who is", "who are", "how does", "how do",
+                        "explain", "describe", "why is", "why does", "tell me about"}
+    is_qa = any(lower.startswith(q) for q in pure_qa_starters)
+    has_skill_keyword = any(w in lower for w in skill_guard)
+    if is_qa and not has_skill_keyword:
+        return Plan(
+            skill="memory_skill",
+            action="recall_context",
+            parameters={"query": text},
+            reply_text="",
+            needs_skill=False,
+        )
+
+    # Presentations and Reports
+    presentation_terms = {"presentation", "ppt", "slides", "slide deck", "powerpoint"}
+    if any(term in lower for term in presentation_terms):
+        clean_topic = re.sub(r'^(make a|create a|generate a|build a)\s*(presentation|ppt|slide deck|slides)( about| on| for)?', '', lower, flags=re.IGNORECASE).strip()
+        return Plan(
+            skill="presentation",
+            action="generate_ppt",
+            parameters={"topic": clean_topic or text, "audience": "general", "tone": "professional"},
+            needs_skill=True,
+        )
+    
+    report_terms = {"academic report", "project report", "generate documentation", "college report"}
+    if any(term in lower for term in report_terms):
+        clean_topic = re.sub(r'^(make a|create a|generate a|build a|write a)\s*(academic report|project report|college report|documentation)( about| on| for)?', '', lower, flags=re.IGNORECASE).strip()
+        return Plan(
+            skill="presentation",
+            action="generate_report",
+            parameters={"projectTitle": clean_topic or text, "projectDescription": text},
+            needs_skill=True,
+        )
 
     return None
 
@@ -366,6 +471,11 @@ def _sanitize_plan(data: dict[str, Any], user_text: str) -> dict[str, Any]:
         "play_media": "browser_agent",
         "music": "browser_agent",
         "home_automation": "system_control",
+        # removed skills — reroute to conversational
+        "learning_course_search": "memory_skill",
+        "learning_explain": "memory_skill",
+        "learning_progress": "memory_skill",
+        "learning_study_plan": "memory_skill",
     }
     skill = alias_map.get(skill, skill)
     plan.skill = skill
@@ -422,6 +532,35 @@ def _sanitize_plan(data: dict[str, Any], user_text: str) -> dict[str, Any]:
         plan.action = "run"
         if "task" not in plan.parameters:
             plan.parameters["task"] = user_text
+
+    # Normalize weather actions
+    if skill == "weather":
+        forecast_words = {"forecast", "week", "tomorrow", "days", "weekly"}
+        rain_words = {"rain", "umbrella", "precipitation"}
+        if any(w in lower for w in rain_words):
+            plan.action = "rain_alert"
+        elif any(w in lower for w in forecast_words):
+            plan.action = "forecast"
+        else:
+            plan.action = "current"
+        if "city" not in plan.parameters:
+            # Try to extract city from user text
+            import re
+            city_match = re.search(r"(?:in|for|at)\s+([A-Za-z\s]+?)(?:\s*$|\?)", user_text, re.IGNORECASE)
+            if city_match:
+                plan.parameters["city"] = city_match.group(1).strip()
+
+    # Normalize news actions
+    if skill == "news":
+        topic_words = {"technology", "tech", "ai", "business", "sports", "science", "health", "politics", "entertainment"}
+        topic_found = next((w for w in topic_words if w in lower), None)
+        if topic_found:
+            plan.action = "topic_headlines"
+            plan.parameters["topic"] = topic_found
+        else:
+            plan.action = "headlines"
+        if "country" not in plan.parameters:
+            plan.parameters["country"] = "in"  # Default to India
 
     if skill == "browser_agent":
         if plan.action not in {"open_browser", "google_search", "youtube_play", "tab_action", "open_website"}:

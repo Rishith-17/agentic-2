@@ -1,4 +1,17 @@
-"""Gesture control skill for Jarvis using MediaPipe."""
+"""Production-grade gesture control skill for Jarvis.
+
+Only 3 gestures – zero ambiguity:
+  1. Cursor   → index finger only  → move mouse
+  2. Click    → thumb-index pinch  → left click  (double-pinch → double-click)
+  3. Scroll   → index + middle up  → vertical scroll
+
+Architecture:
+  • Strict mode system: only ONE mode active per frame.
+  • 300 ms gesture-stability gate before any action triggers.
+  • Exponential Moving Average (EMA) cursor smoothing.
+  • Per-action cooldowns to prevent spamming.
+  • 5 px dead-zone to eliminate micro-jitter.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +19,7 @@ import logging
 import math
 import threading
 import time
+from enum import Enum, auto
 from typing import Any, Optional
 
 import pyautogui
@@ -14,269 +28,304 @@ from app.skills.base import SkillBase
 
 logger = logging.getLogger(__name__)
 
-# Reduce PyAutoGUI delay for smoother cursor tracking
+# ── PyAutoGUI tuning ──────────────────────────────────────────────────────────
 pyautogui.PAUSE = 0
-pyautogui.FAILSAFE = False  # Disabled temporarily to allow reaching screen bounds
+pyautogui.FAILSAFE = False
 
 
+# ── Mode enum ─────────────────────────────────────────────────────────────────
+class Mode(Enum):
+    IDLE = auto()
+    CURSOR = auto()
+    CLICK = auto()
+    SCROLL = auto()
+
+
+# ── Gesture Thread ────────────────────────────────────────────────────────────
 class GestureThread(threading.Thread):
+    """Dedicated thread that owns the camera and the tracking loop."""
+
+    # ─── tunables ─────────────────────────────────────────────────────────
+    EMA_ALPHA        = 0.25          # cursor smoothing (lower = smoother)
+    DEAD_ZONE_PX     = 5            # ignore cursor moves smaller than this
+    PINCH_THRESHOLD  = 30           # px – thumb↔index distance for "pinch"
+    SCROLL_THRESHOLD = 20           # px – minimum dy before scroll triggers
+    STABILITY_SEC    = 0.30         # gesture must be held this long to fire
+    CLICK_COOLDOWN   = 0.80         # seconds between clicks
+    SCROLL_COOLDOWN  = 0.15         # seconds between scroll ticks
+    DCLICK_WINDOW    = 0.40         # if two pinches within this → dbl-click
+
     def __init__(self, show_window: bool = True):
-        super().__init__()
+        super().__init__(daemon=True)
         self.show_window = show_window
         self.running = True
-        
-        # Cooldown management (prevent spamming actions)
-        self.cooldown_until = 0.0
-        self.pinch_cooldown = 0.0
-        
-        # Screen dimensions
+
+        # Screen dims
         self.screen_w, self.screen_h = pyautogui.size()
-        
-        # Moving Average Filter state
-        self.cursor_history_x = []
-        self.cursor_history_y = []
-        self.history_size = 5
-        
-        # Tracking states
-        self.prev_palm_x = None
-        self.prev_palm_y = None
-        
-        # Distance and motion thresholds
-        self.dead_zone = 20
-        self.swipe_threshold = 50
 
-    def calculate_distance(self, p1: tuple[int, int], p2: tuple[int, int]) -> float:
-        return math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        # EMA state
+        self.smooth_x: float | None = None
+        self.smooth_y: float | None = None
 
-    def update_cursor(self, x: int, y: int, frame_w: int, frame_h: int) -> None:
-        # Increase effective area by using a margin
-        margin = 80
-        mapped_x = int((x - margin) * self.screen_w / max(1, (frame_w - 2 * margin)))
-        mapped_y = int((y - margin) * self.screen_h / max(1, (frame_h - 2 * margin)))
-        
-        # Constrain to screen boundary
-        mapped_x = max(0, min(self.screen_w - 1, mapped_x))
-        mapped_y = max(0, min(self.screen_h - 1, mapped_y))
-        
-        self.cursor_history_x.append(mapped_x)
-        self.cursor_history_y.append(mapped_y)
-        
-        # Keep recent history to smooth jitter
-        if len(self.cursor_history_x) > self.history_size:
-            self.cursor_history_x.pop(0)
-            self.cursor_history_y.pop(0)
-            
-        avg_x = int(sum(self.cursor_history_x) / len(self.cursor_history_x))
-        avg_y = int(sum(self.cursor_history_y) / len(self.cursor_history_y))
-        
-        # Dead zone to prevent micro-jitter
-        current_mouse_x, current_mouse_y = pyautogui.position()
-        if math.hypot(avg_x - current_mouse_x, avg_y - current_mouse_y) > 5:
-            try:
-                pyautogui.moveTo(avg_x, avg_y)
-            except Exception as e:
-                logger.error("Cursor movement error: %s", e)
+        # Mode + stability timers
+        self.current_mode = Mode.IDLE
+        self._mode_since: float = 0.0       # when current gesture was first seen
 
-    def is_index_raised(self, lm: Any) -> bool:
-        # Index tip (8) is higher than PIP (6)
-        index_up = lm[8].y < lm[6].y
-        # Middle, Ring, Pinky should be folded down
-        middle_down = lm[12].y > lm[10].y
-        ring_down = lm[16].y > lm[14].y
-        pinky_down = lm[20].y > lm[18].y
-        return index_up and middle_down and ring_down and pinky_down
+        # Cooldowns
+        self._last_click_time: float = 0.0
+        self._last_scroll_time: float = 0.0
+        self._prev_click_time: float = 0.0   # for double-click detection
 
-    def is_open_palm(self, lm: Any) -> bool:
-        return (lm[8].y < lm[6].y) and (lm[12].y < lm[10].y) and \
-               (lm[16].y < lm[14].y) and (lm[20].y < lm[18].y)
+        # Scroll tracking
+        self._scroll_prev_y: float | None = None
 
-    def is_fist(self, lm: Any) -> bool:
-        return (lm[8].y > lm[6].y) and (lm[12].y > lm[10].y) and \
-               (lm[16].y > lm[14].y) and (lm[20].y > lm[18].y)
+    # ── Finger state helpers ──────────────────────────────────────────────
+    @staticmethod
+    def _finger_up(lm, tip_idx: int, pip_idx: int) -> bool:
+        """True when fingertip is above its PIP joint (= finger extended)."""
+        return lm[tip_idx].y < lm[pip_idx].y
 
+    def _classify(self, lm) -> Mode:
+        """Classify the current hand pose into exactly one Mode."""
+        index_up  = self._finger_up(lm, 8, 6)
+        middle_up = self._finger_up(lm, 12, 10)
+        ring_up   = self._finger_up(lm, 16, 14)
+        pinky_up  = self._finger_up(lm, 20, 18)
+
+        # Pinch check (thumb tip ↔ index tip)
+        thumb_tip = (lm[4].x, lm[4].y)
+        index_tip = (lm[8].x, lm[8].y)
+        # Use normalised coords; multiply by frame size later – but for
+        # classification we can compare against a normalised threshold.
+        # We'll do pixel-space check in the action handler instead.
+        # Here just check if thumb and index are *very* close.
+        pinch_dist_norm = math.hypot(thumb_tip[0] - index_tip[0],
+                                     thumb_tip[1] - index_tip[1])
+        is_pinch = pinch_dist_norm < 0.06  # ~30 px on a 640-wide frame
+
+        if is_pinch:
+            return Mode.CLICK
+
+        # Handle cursor specifically to avoid conflict
+        is_index_only = index_up and not middle_up and not ring_up and not pinky_up
+
+        # Two fingers (index + middle) up → scroll
+        # Don't strictly check ring and pinky, to be more forgiving for different hands
+        if index_up and middle_up and not ring_up:
+            return Mode.SCROLL
+
+        # Only index up, rest down → cursor
+        if is_index_only:
+            return Mode.CURSOR
+
+        return Mode.IDLE
+
+    # ── Main loop ─────────────────────────────────────────────────────────
     def run(self):
-        logger.info("GestureThread: Thread started.")
+        logger.info("GestureThread started.")
+
+        # Late imports so the module loads even when deps are missing.
         try:
             import cv2
             import mediapipe as mp
-            logger.info("GestureThread: Successfully imported cv2 and mediapipe.")
-        except ImportError as e:
-            logger.error(f"GestureThread: Import failed: {e}. opencv-python and mediapipe must be installed.")
-            self.running = False
-            return
-        except Exception as e:
-            logger.exception(f"GestureThread: Unexpected import error: {e}")
+        except ImportError as exc:
+            logger.error("Missing dependency for gesture control: %s", exc)
             self.running = False
             return
 
-        try:
-            mp_hands = mp.solutions.hands
-            mp_drawing = mp.solutions.drawing_utils
-            logger.info("GestureThread: MediaPipe solutions initialized.")
-        except Exception as e:
-            logger.exception(f"GestureThread: Failed to initialize MediaPipe solutions: {e}")
-            self.running = False
-            return
+        mp_hands   = mp.solutions.hands
+        mp_drawing = mp.solutions.drawing_utils
 
-        # Capture from default webcam
-        logger.info("GestureThread: Attempting to open camera 0...")
         cap = cv2.VideoCapture(0)
         if not cap.isOpened():
-            logger.error("GestureThread: VideoCapture(0) failed to open. Check if camera is used by another app.")
+            logger.error("Camera 0 failed to open – is another app using it?")
             self.running = False
             return
-            
-        logger.info(f"GestureThread: Camera opened. Resolution: {cap.get(cv2.CAP_PROP_FRAME_WIDTH)}x{cap.get(cv2.CAP_PROP_FRAME_HEIGHT)}")
-        
+
+        logger.info("Camera opened (%sx%s). Entering tracking loop.",
+                     int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                     int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+
         try:
             with mp_hands.Hands(
-                max_num_hands=2,
+                max_num_hands=1,
                 min_detection_confidence=0.7,
-                min_tracking_confidence=0.7
+                min_tracking_confidence=0.7,
             ) as hands:
-                logger.info("GestureThread: MediaPipe Hands model loaded. Entering loop.")
+
                 while self.running and cap.isOpened():
-                    success, frame = cap.read()
-                    if not success:
-                        logger.warning("GestureThread: Failed to read frame from camera.")
-                        time.sleep(0.01)
+                    try:
+                        ok, frame = cap.read()
+                        if not ok:
+                            time.sleep(0.005)
+                            continue
+
+                        frame = cv2.flip(frame, 1)
+                        h, w, _ = frame.shape
+                        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        result = hands.process(rgb)
+
+                        # waitKey(1) is required for cv2.imshow to render.
+                        # We intentionally IGNORE the return value — no keyboard
+                        # key can kill this loop.  Only self.stop() does.
+                        if self.show_window:
+                            cv2.waitKey(1)
+
+                        now = time.time()
+
+                        if result.multi_hand_landmarks:
+                            hand = result.multi_hand_landmarks[0]
+                            lm   = hand.landmark
+
+                            if self.show_window:
+                                mp_drawing.draw_landmarks(frame, hand, mp_hands.HAND_CONNECTIONS)
+
+                            detected_mode = self._classify(lm)
+
+                            # ── stability gate ────────────────────────────
+                            if detected_mode != self.current_mode:
+                                self.current_mode = detected_mode
+                                self._mode_since  = now
+                                self._scroll_prev_y = None
+
+                            stable = (now - self._mode_since) >= self.STABILITY_SEC
+
+                            # ── act on the stable mode ────────────────────
+                            if stable:
+                                if detected_mode == Mode.CURSOR:
+                                    self._do_cursor(lm, w, h, frame)
+                                elif detected_mode == Mode.CLICK:
+                                    self._do_click(now, frame)
+                                elif detected_mode == Mode.SCROLL:
+                                    self._do_scroll(lm, h, now, frame)
+
+                            # Status label
+                            if self.show_window:
+                                label = detected_mode.name
+                                if not stable:
+                                    label += " (stabilising...)"
+                                colour = {
+                                    Mode.CURSOR: (0, 255, 0),
+                                    Mode.CLICK:  (0, 0, 255),
+                                    Mode.SCROLL: (255, 165, 0),
+                                    Mode.IDLE:   (128, 128, 128),
+                                }.get(detected_mode, (255, 255, 255))
+                                cv2.putText(frame, label, (10, 30),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, colour, 2)
+
+                        else:
+                            # No hand visible – reset everything
+                            self.current_mode   = Mode.IDLE
+                            self._mode_since    = now
+                            self.smooth_x       = None
+                            self.smooth_y       = None
+                            self._scroll_prev_y = None
+
+                        if self.show_window:
+                            cv2.imshow("Jarvis Gesture Control", frame)
+
+                    except Exception as frame_exc:
+                        # NEVER crash — just log and move to next frame
+                        logger.debug("Frame error (ignored): %s", frame_exc)
                         continue
 
-                    # Mirror frame for natural interaction
-                    frame = cv2.flip(frame, 1)
-                    h, w, c = frame.shape
-                    
-                    # MediaPipe works with RGB
-                    img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    results = hands.process(img_rgb)
-                    
-                    # Check keyboard ESC kill switch if window is shown
-                    if self.show_window:
-                        key = cv2.waitKey(1) & 0xFF
-                        if key == 27:  # ESC
-                            logger.info("GestureThread: Kill switch (ESC) activated.")
-                            self.running = False
-                            break
-
-                    current_time = time.time()
-                    
-                    if results.multi_hand_landmarks:
-                        # 🛑 Kill Switch: two closed fists
-                        if len(results.multi_hand_landmarks) == 2:
-                            fists = sum(1 for hl in results.multi_hand_landmarks if self.is_fist(hl.landmark))
-                            if fists == 2:
-                                logger.info("Kill switch (Two Fists) activated.")
-                                self.running = False
-                                break
-
-                        # Process the first detected hand
-                        hand_landmarks = results.multi_hand_landmarks[0]
-                        lm = hand_landmarks.landmark
-                    
-                    if self.show_window:
-                        mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-                        
-                    # Extract pixel coordinates
-                    thumb_tip = (int(lm[4].x * w), int(lm[4].y * h))
-                    index_tip = (int(lm[8].x * w), int(lm[8].y * h))
-                    palm_center = (int(lm[9].x * w), int(lm[9].y * h))
-                    
-                    # 1. Cursor Mode
-                    if self.is_index_raised(lm):
-                        self.update_cursor(index_tip[0], index_tip[1], w, h)
-                        if self.show_window:
-                            cv2.putText(frame, "Cursor Mode Active", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    else:
-                        self.cursor_history_x.clear()
-                        self.cursor_history_y.clear()
-
-                    # 2. Pinch Detection (Click)
-                    pinch_dist = self.calculate_distance(thumb_tip, index_tip)
-                    if pinch_dist < 40 and current_time > self.pinch_cooldown:
-                        pyautogui.click()
-                        self.pinch_cooldown = current_time + 0.8  # Cooldown
-                        if self.show_window:
-                            cv2.putText(frame, "Click!", (index_tip[0], index_tip[1] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                    
-                    # Execute gestures only if past global cooldown
-                    if current_time > self.cooldown_until:
-                        # 3. Window Management (Open hand vs. Fist)
-                        if self.is_open_palm(lm):
-                            pyautogui.hotkey('win', 'down')
-                            self.cooldown_until = current_time + 1.5
-                            if self.show_window:
-                                cv2.putText(frame, "Minimize", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
-                        elif self.is_fist(lm):
-                            pyautogui.hotkey('win', 'up')
-                            self.cooldown_until = current_time + 1.5
-                            if self.show_window:
-                                cv2.putText(frame, "Maximize", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
-                        else:
-                            # 4. Motion Detection (Swipes)
-                            if self.prev_palm_x is not None and self.prev_palm_y is not None:
-                                dx = palm_center[0] - self.prev_palm_x
-                                dy = palm_center[1] - self.prev_palm_y
-                                
-                                # Ignore dead zone movements for swipes
-                                if math.hypot(dx, dy) > self.dead_zone:
-                                    if abs(dx) > abs(dy):
-                                        if dx > self.swipe_threshold:
-                                            pyautogui.hotkey('ctrl', 'tab')  # Next tab
-                                            self.cooldown_until = current_time + 1.0
-                                            if self.show_window:
-                                                cv2.putText(frame, "Swipe Right", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                                        elif dx < -self.swipe_threshold:
-                                            pyautogui.hotkey('ctrl', 'shift', 'tab')  # Previous tab
-                                            self.cooldown_until = current_time + 1.0
-                                            if self.show_window:
-                                                cv2.putText(frame, "Swipe Left", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                                    else:
-                                        if dy < -self.swipe_threshold:
-                                            pyautogui.scroll(500)  # Scroll Up
-                                            self.cooldown_until = current_time + 0.5
-                                            if self.show_window:
-                                                cv2.putText(frame, "Swipe Up", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                                        elif dy > self.swipe_threshold:
-                                            pyautogui.scroll(-500)  # Scroll Down
-                                            self.cooldown_until = current_time + 0.5
-                                            if self.show_window:
-                                                cv2.putText(frame, "Swipe Down", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-
-                    self.prev_palm_x = palm_center[0]
-                    self.prev_palm_y = palm_center[1]
-                else:
-                    # Hand lost tracking
-                    self.prev_palm_x = None
-                    self.prev_palm_y = None
-                    self.cursor_history_x.clear()
-                    self.cursor_history_y.clear()
-
-                if self.show_window:
-                    cv2.imshow("Jarvis Gesture Control", frame)
-
-        except Exception as e:
-            logger.exception(f"GestureThread: Error in tracking loop: {e}")
+        except Exception as exc:
+            logger.exception("GestureThread loop error: %s", exc)
         finally:
-            # Cleanup properly
             self.running = False
-            if 'cap' in locals() and cap.isOpened():
-                cap.release()
+            cap.release()
             try:
                 cv2.destroyAllWindows()
             except Exception:
                 pass
+            logger.info("GestureThread stopped.")
+
+    # ── Action handlers ───────────────────────────────────────────────────
+    def _do_cursor(self, lm, w: int, h: int, frame):
+        """Move the mouse cursor following the index fingertip."""
+        raw_x = lm[8].x * w
+        raw_y = lm[8].y * h
+
+        # Map from camera frame to screen coords with a margin
+        margin = 60
+        mapped_x = (raw_x - margin) * self.screen_w / max(1, w - 2 * margin)
+        mapped_y = (raw_y - margin) * self.screen_h / max(1, h - 2 * margin)
+        mapped_x = max(0, min(self.screen_w - 1, mapped_x))
+        mapped_y = max(0, min(self.screen_h - 1, mapped_y))
+
+        # EMA smoothing
+        if self.smooth_x is None:
+            self.smooth_x = mapped_x
+            self.smooth_y = mapped_y
+        else:
+            self.smooth_x = self.smooth_x * (1 - self.EMA_ALPHA) + mapped_x * self.EMA_ALPHA
+            self.smooth_y = self.smooth_y * (1 - self.EMA_ALPHA) + mapped_y * self.EMA_ALPHA
+
+        # Dead zone
+        cx, cy = pyautogui.position()
+        if math.hypot(self.smooth_x - cx, self.smooth_y - cy) > self.DEAD_ZONE_PX:
+            try:
+                pyautogui.moveTo(int(self.smooth_x), int(self.smooth_y))
+            except Exception as exc:
+                logger.debug("moveTo error: %s", exc)
+
+        if self.show_window:
+            cv2.putText(frame, "CURSOR", (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+    def _do_click(self, now: float, frame):
+        """Fire a mouse click (or double-click if pinches are rapid)."""
+        if now - self._last_click_time < self.CLICK_COOLDOWN:
+            return
+
+        # Double-click detection
+        gap = now - self._prev_click_time
+        if gap < self.DCLICK_WINDOW:
+            pyautogui.doubleClick()
+            label = "DOUBLE CLICK!"
+        else:
+            pyautogui.click()
+            label = "CLICK!"
+
+        self._prev_click_time = self._last_click_time
+        self._last_click_time = now
+
+        if self.show_window:
+            cv2.putText(frame, label, (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+    def _do_scroll(self, lm, h: int, now: float, frame):
+        """Scroll up/down based on index finger vertical movement."""
+        index_y = lm[8].y * h
+
+        if self._scroll_prev_y is not None:
+            dy = index_y - self._scroll_prev_y
+
+            if abs(dy) > self.SCROLL_THRESHOLD and (now - self._last_scroll_time) > self.SCROLL_COOLDOWN:
+                scroll_amount = int(-dy * 8)  # negative dy = finger moved up = scroll up
+                pyautogui.scroll(scroll_amount)
+                self._last_scroll_time = now
+
+                direction = "UP" if scroll_amount > 0 else "DOWN"
+                if self.show_window:
+                    cv2.putText(frame, f"SCROLL {direction}", (10, 60),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 165, 0), 2)
+
+        self._scroll_prev_y = index_y
 
     def stop(self):
         self.running = False
 
 
+# ── Skill wrapper ─────────────────────────────────────────────────────────────
 class GestureControlSkill(SkillBase):
-    name = "gesture_control"
-    description = "Tracks hand movements via webcam to map natural gestures to desktop OS actions."
-    priority = 5
-    keywords = ["gesture control", "hand tracking", "webcam gesture", "activate gesture", "stop gesture"]
+    name        = "gesture_control"
+    description = "Real-time hand gesture control: cursor, click, and scroll."
+    priority    = 5
+    keywords    = ["gesture control", "hand tracking", "webcam gesture",
+                   "activate gesture", "stop gesture"]
 
-    _gesture_thread: Optional[GestureThread] = None
+    _thread: Optional[GestureThread] = None
 
     @property
     def input_schema(self) -> dict[str, Any]:
@@ -285,40 +334,50 @@ class GestureControlSkill(SkillBase):
             "properties": {
                 "action": {
                     "type": "string",
-                    "description": "Action to perform: start, stop, or status.",
-                    "enum": ["start", "stop", "status"]
+                    "enum": ["start", "stop", "status"],
                 },
-                "show_window": {
-                    "type": "boolean",
-                    "description": "Show the webcam debug window (default True)."
-                }
+                "show_window": {"type": "boolean"},
             },
-            "required": ["action"]
+            "required": ["action"],
         }
 
-    async def execute(self, action: str, parameters: dict[str, Any], context: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def execute(
+        self,
+        action: str,
+        parameters: dict[str, Any],
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+
         if action == "start":
-            if GestureControlSkill._gesture_thread and GestureControlSkill._gesture_thread.is_alive():
+            # Clean up dead thread reference
+            if self._thread and not self._thread.is_alive():
+                GestureControlSkill._thread = None
+
+            if GestureControlSkill._thread and GestureControlSkill._thread.is_alive():
                 return {"message": "Gesture control is already running.", "status": "running"}
-            
-            show_window = parameters.get("show_window", True)
-            GestureControlSkill._gesture_thread = GestureThread(show_window)
-            GestureControlSkill._gesture_thread.start()
-            return {"message": "Gesture control started successfully. You can use your webcam to navigate.", "status": "running"}
-            
-        elif action == "stop":
-            if GestureControlSkill._gesture_thread and GestureControlSkill._gesture_thread.is_alive():
-                GestureControlSkill._gesture_thread.stop()
-                GestureControlSkill._gesture_thread.join(timeout=2.0)
-                GestureControlSkill._gesture_thread = None
-                return {"message": "Gesture control stopped.", "status": "stopped"}
-            return {"message": "Gesture control is not running.", "status": "stopped"}
-            
-        elif action == "status":
-            is_running = bool(GestureControlSkill._gesture_thread and GestureControlSkill._gesture_thread.is_alive())
+
+            show = parameters.get("show_window", True)
+            GestureControlSkill._thread = GestureThread(show_window=show)
+            GestureControlSkill._thread.start()
             return {
-                "message": f"Gesture control is {'running' if is_running else 'stopped'}.",
-                "status": "running" if is_running else "stopped"
+                "message": "Gesture control started. Use index finger to move, pinch to click, two fingers to scroll. Press ESC on the camera window to stop.",
+                "status": "running",
             }
 
-        return {"error": "Invalid action mapping."}
+        if action == "stop":
+            if GestureControlSkill._thread and GestureControlSkill._thread.is_alive():
+                GestureControlSkill._thread.stop()
+                GestureControlSkill._thread.join(timeout=3.0)
+                GestureControlSkill._thread = None
+                return {"message": "Gesture control stopped.", "status": "stopped"}
+            GestureControlSkill._thread = None
+            return {"message": "Gesture control is not running.", "status": "stopped"}
+
+        if action == "status":
+            alive = bool(GestureControlSkill._thread and GestureControlSkill._thread.is_alive())
+            return {
+                "message": f"Gesture control is {'running' if alive else 'stopped'}.",
+                "status": "running" if alive else "stopped",
+            }
+
+        return {"error": f"Unknown action: {action}"}

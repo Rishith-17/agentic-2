@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import sys
 import asyncio
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 import base64
 import logging
 import os
@@ -24,7 +28,7 @@ from app.core.pipeline import run_text_pipeline, run_voice_pipeline
 from app.dependencies import AppState, get_app_state, init_app, verify_token
 from app.services.wake_porcupine import WakeWordService
 from app.vision.schemas import VisionActivateRequest, VisionOverlaySettings, VisionStartRequest
-from preflight_check import run_preflight_sync
+from preflight_check import run_preflight, run_preflight_sync
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -54,36 +58,57 @@ def _launch_bridge() -> subprocess.Popen | None:
 
 
 async def _bridge_monitor(state: AppState) -> None:
-    """Poll the bridge /health endpoint; restart the process if it dies."""
+    """Poll the bridge /health endpoint and log status. Does NOT restart the bridge."""
     node_url = state.settings.whatsapp_node_url.rstrip("/")
     health_url = f"{node_url}/health"
-    restart_delay = 5  # seconds between restart attempts
+    poll_interval = 30
 
     while True:
-        await asyncio.sleep(15)  # check every 15 s
-        proc = state.whatsapp_process
-
-        # 1. Check if the OS process is still alive
-        process_alive = proc is not None and proc.poll() is None
-
-        if not process_alive:
-            logger.warning("WhatsApp bridge process died — restarting in %ss", restart_delay)
-            await asyncio.sleep(restart_delay)
-            state.whatsapp_process = _launch_bridge()
-            continue
-
-        # 2. Check the HTTP health endpoint
+        await asyncio.sleep(poll_interval)
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=10.0) as client:
                 r = await client.get(health_url)
-            if r.status_code != 200:
-                logger.warning("WhatsApp bridge unhealthy (HTTP %s) — restarting", r.status_code)
-                proc.terminate()
-                await asyncio.sleep(restart_delay)
-                state.whatsapp_process = _launch_bridge()
-        except httpx.RequestError:
-            # Bridge may still be starting up; not fatal yet
-            logger.debug("WhatsApp bridge health check unreachable (may be starting)")
+            if r.status_code == 200:
+                data = r.json()
+                status = data.get("status", "unknown")
+                if status == "connected":
+                    logger.debug("WhatsApp bridge health check: connected")
+                else:
+                    logger.warning("WhatsApp bridge health check: %s", status)
+            else:
+                logger.warning("WhatsApp bridge unhealthy (HTTP %s)", r.status_code)
+        except httpx.RequestError as exc:
+            logger.debug("WhatsApp bridge unreachable: %s", exc)
+
+
+# ── Voice command executor (called from wake word → VAD → STT → Command) ─────
+
+async def _execute_voice_command(state: AppState, command_text: str) -> None:
+    """Execute a voice-detected command through the text pipeline and broadcast."""
+    from app.core.pipeline import run_text_pipeline
+
+    try:
+        logger.info("🚀 Executing voice command: '%s'", command_text)
+        result = await run_text_pipeline(
+            state, command_text, session_id="voice_wake"
+        )
+        reply = result.get("reply", "Done.")
+        logger.info("✅ Voice command result: %s", reply[:200])
+
+        # Broadcast result to HUD via WebSocket
+        await ws_manager.broadcast({
+            "type": "voice_command",
+            "command": command_text,
+            "reply": reply,
+            "skill_type": result.get("skill_type"),
+        })
+    except Exception as exc:
+        logger.error("Voice command execution failed: %s", exc)
+        await ws_manager.broadcast({
+            "type": "voice_command_error",
+            "command": command_text,
+            "error": str(exc),
+        })
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -98,10 +123,11 @@ async def lifespan(app: FastAPI):
 
     st = await init_app()
 
-    # Auto-start WhatsApp bridge
-    st.whatsapp_process = _launch_bridge()
+    # WhatsApp bridge is managed externally (node index.js started separately)
+    # Auto-launch disabled to prevent duplicate instances causing connectionReplaced (440)
+    st.whatsapp_process = None
 
-    # Start background monitor
+    # Start background monitor (health check only, no restart)
     _bridge_monitor_task = asyncio.create_task(_bridge_monitor(st))
 
     # Start metrics broadcast loop for WebSocket clients
@@ -112,9 +138,19 @@ async def lifespan(app: FastAPI):
         def on_wake() -> None:
             logger.info("WAKE WORD DETECTED")
 
-        success = st.wake.start(on_wake)
+        def on_command(cmd: dict) -> None:
+            """Route a voice-detected command through the text pipeline."""
+            logger.info("Voice command received: %s", cmd)
+            command_text = cmd.get("command", "")
+            if command_text:
+                # Fire-and-forget: run the text pipeline in the event loop
+                asyncio.ensure_future(
+                    _execute_voice_command(st, command_text)
+                )
+
+        success = st.wake.start(on_wake, on_command=on_command)
         if success:
-            logger.info("Porcupine wake word service started")
+            logger.info("Porcupine wake word service started (with VAD + Speech-to-Command)")
         else:
             logger.warning("Porcupine wake word service failed to start (check access key)")
 
@@ -517,7 +553,7 @@ async def system_metrics(_auth: None = Depends(verify_token)) -> dict[str, Any]:
 @app.get("/api/system/health")
 async def system_health(_auth: None = Depends(verify_token)) -> dict[str, Any]:
     """Automation + browser readiness health report for UI/ops."""
-    report = run_preflight_sync(cache_ttl_s=60, force_refresh=False)
+    report = await run_preflight(cache_ttl_s=60, force_refresh=False)
     return {
         "automation_ready": report.get("automation_ready", False),
         "browser_status": report.get("browser_status", "unknown"),
@@ -557,7 +593,7 @@ async def system_logs(
         except Exception as exc:
             logs[name] = {"exists": True, "error": str(exc), "lines": []}
 
-    preflight = run_preflight_sync(cache_ttl_s=10, force_refresh=False)
+    preflight = await run_preflight(cache_ttl_s=10, force_refresh=False)
     return {
         "ok": True,
         "logs": logs,
@@ -595,7 +631,19 @@ async def chat(
     tts = out.pop("tts_audio", None)
     if tts:
         out["tts_audio_base64"] = base64.b64encode(tts).decode("ascii") if tts else None
-    return out
+    out.pop("tts_audio", None)
+    return _sanitize_for_json(out)
+
+
+def _sanitize_for_json(data: Any) -> Any:
+    """Recursively remove bytes/binary objects so Pydantic can serialize to JSON."""
+    if isinstance(data, dict):
+        return {k: _sanitize_for_json(v) for k, v in data.items() if not isinstance(v, bytes)}
+    elif isinstance(data, list):
+        return [_sanitize_for_json(v) for v in data if not isinstance(v, bytes)]
+    elif isinstance(data, bytes):
+        return None
+    return data
 
 
 @app.post("/api/agent/execute")
@@ -638,13 +686,17 @@ async def agent_execute(
             }
         )
 
-    return {
+    tts = out.pop("tts_audio", None)
+    if tts:
+        out["tts_audio_base64"] = base64.b64encode(tts).decode("ascii")
+        
+    return _sanitize_for_json({
         "ok": True,
         "task": body.task,
         "session_id": body.session_id,
         "steps": steps,
         "result": out,
-    }
+    })
 
 
 class ExecuteBody(BaseModel):
@@ -715,10 +767,21 @@ async def wake_start(
     def on_wake() -> None:
         logger.info("Wake word detected")
 
-    if not svc.start(on_wake):
+    def on_command(cmd: dict) -> None:
+        logger.info("Voice command: %s", cmd)
+        command_text = cmd.get("command", "")
+        if command_text:
+            asyncio.ensure_future(_execute_voice_command(state, command_text))
+
+    if not svc.start(on_wake, on_command=on_command):
         return {"started": False, "message": "Porcupine not configured or failed to start"}
     state.wake = svc
-    return {"started": True, "message": "Listening for wake word"}
+    return {
+        "started": True,
+        "message": "Listening for wake word (with VAD + Speech-to-Command)",
+        "keyword": s.porcupine_keyword_path or "built-in:computer",
+        "model": s.nim_fast_model,
+    }
 
 
 @app.post("/api/wake/stop")
@@ -730,6 +793,37 @@ async def wake_stop(
         state.wake.stop()
         state.wake = None
     return {"stopped": True}
+
+
+class SpeechProcessBody(BaseModel):
+    text: str = Field(..., min_length=1)
+
+
+@app.post("/api/voice/process")
+async def voice_process_text(
+    body: SpeechProcessBody,
+    state: AppState = Depends(get_app_state),
+    _auth: None = Depends(verify_token),
+) -> dict[str, Any]:
+    """Test endpoint: run raw text through the speech-to-command processor."""
+    from app.services.speech_command_processor import process_speech_llm
+    result = await process_speech_llm(body.text, state.settings)
+    return {"ok": True, "input": body.text, "command": result}
+
+
+@app.get("/api/wake/status")
+async def wake_status(
+    state: AppState = Depends(get_app_state),
+    _auth: None = Depends(verify_token),
+) -> dict[str, Any]:
+    """Check wake word listener status."""
+    s = state.settings
+    return {
+        "active": state.wake is not None,
+        "keyword_path": s.porcupine_keyword_path,
+        "model": s.nim_fast_model,
+        "has_access_key": bool(s.porcupine_access_key),
+    }
 
 
 @app.get("/api/vision/status")

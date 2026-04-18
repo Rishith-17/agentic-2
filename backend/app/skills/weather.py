@@ -66,9 +66,18 @@ class WeatherSkill(SkillBase):
                 r.raise_for_status()
                 d = r.json()
                 location = d["location"]["name"]
+                country  = d["location"]["country"]
                 condition = d["current"]["condition"]["text"]
-                temp = d["current"]["temp_c"]
-                msg = f"{location}: {condition}, {temp:.1f}°C"
+                temp_c   = d["current"]["temp_c"]
+                feels_c  = d["current"]["feelslike_c"]
+                humidity = d["current"]["humidity"]
+                wind_kph = d["current"]["wind_kph"]
+                msg = (
+                    f"🌍 {location}, {country}\n"
+                    f"🌡️ {temp_c:.1f}°C  (feels like {feels_c:.1f}°C)\n"
+                    f"☁️ {condition}\n"
+                    f"💧 Humidity: {humidity}%  |  💨 Wind: {wind_kph:.0f} km/h"
+                )
                 return {
                     "message": msg,
                     "summary_text": msg,
@@ -76,7 +85,7 @@ class WeatherSkill(SkillBase):
                     "skill_type": "weather",
                     "data": {
                         "city": location,
-                        "temp": temp,
+                        "temp": temp_c,
                         "condition": condition,
                         "icon": d["current"]["condition"]["icon"]
                     }
@@ -89,14 +98,15 @@ class WeatherSkill(SkillBase):
                 )
                 r.raise_for_status()
                 d = r.json()
-                
-                lines = []
+                location = d["location"]["name"]
+                lines = [f"📅 3-Day Forecast — {location}"]
                 for day in d.get("forecast", {}).get("forecastday", []):
                     date = day["date"]
                     cond = day["day"]["condition"]["text"]
                     max_t = day["day"]["maxtemp_c"]
                     min_t = day["day"]["mintemp_c"]
-                    lines.append(f"{date}: {cond}, {min_t:.0f}-{max_t:.0f}°C")
+                    rain_chance = day["day"].get("daily_chance_of_rain", 0)
+                    lines.append(f"📆 {date}: {cond}, {min_t:.0f}–{max_t:.0f}°C  🌧️ {rain_chance}%")
                 
                 msg = "\n".join(lines) or "No forecast data"
                 return {"message": msg, "summary_text": msg, "skill_type": "weather"}

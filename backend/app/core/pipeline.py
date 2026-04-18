@@ -382,6 +382,23 @@ async def run_text_pipeline(
     skill_result: dict[str, Any] | None = None
     skill_type: str | None = None
 
+
+    # General Q&A: when no skill is needed, answer directly via LLM
+    if not plan.get('needs_skill', True) and not reply:
+        try:
+            msgs = [
+                {'role': 'system', 'content': (
+                    'You are J.A.R.V.I.S., a smart, calm, and friendly AI assistant. '
+                    'Answer the user question directly and conversationally. '
+                    'Be concise, warm, and use simple English.'
+                )},
+                {'role': 'user', 'content': user_text},
+            ]
+            reply = await llm.chat(msgs, state.settings, temperature=0.7)
+        except Exception as e:
+            logger.warning('Direct LLM Q&A failed: %s', e)
+            reply = "I'm not sure about that, but I'm here if you need anything else."
+
     if plan.get("needs_skill", True) and plan.get("skill"):
         exec_res = await state.router.route(
             plan["skill"],
@@ -453,6 +470,40 @@ async def run_text_pipeline(
     # Fallback skill_type from plan
     if not skill_type and plan.get("skill"):
         skill_type = plan.get("skill")
+
+    # ── JARVIS PERSONA REWRITE ──────────────────────────────────────────────
+    if reply and skill_type != "briefing":
+        try:
+            jarvis_prompt = (
+                "You are Jarvis, a highly intelligent AI assistant with a clean, futuristic interface. Your responses must always be structured, concise, and UI-friendly.\n\n"
+                "RULES:\n"
+                "- Never return raw text, logs, or unformatted API responses\n"
+                "- Always organize output using headings, spacing, and lists\n"
+                "- Keep responses short, clear, and readable\n"
+                "- Highlight key information (names, time, subject, location)\n"
+                "- Use bullet points or numbered lists\n"
+                "- Avoid long paragraphs\n\n"
+                "FORMAT BASED ON TASK:\n"
+                "📧 Emails:\nDisplay as a numbered list:\n1. Sender:\n   Subject:\n   Time:\n   Summary: (2–3 lines max)\n\n"
+                "📰 News:\nDisplay as:\n1. Headline:\n   Source:\n   Summary: (short, clear)\n\n"
+                "📅 Schedule:\nDisplay as:\n1. Event:\n   Time:\n   Location:\n   Notes:\n\n"
+                "📍 Location / Maps:\nDisplay as:\n- Place Name:\n- Distance:\n- Rating:\n- Address:\n\n"
+                "⚠️ IMPORTANT:\n"
+                "- Clean formatting is mandatory\n"
+                "- No unnecessary words\n"
+                "- No raw JSON or API dumps\n"
+                "- Output must look like a professional dashboard\n"
+                "- If no data is found, respond clearly: 'No relevant results found.'\n"
+                "- Always behave like a premium AI system (like Iron Man Jarvis).\n\n"
+                f"User said: {user_text}\n"
+                f"System Output to reformat: {reply}"
+            )
+            messages = [{"role": "user", "content": jarvis_prompt}]
+            rewritten = await llm.chat(messages, state.settings, temperature=0.5)
+            if rewritten and len(rewritten.strip()) > 0:
+                reply = rewritten.strip()
+        except Exception as e:
+            logger.warning("JARVIS rewrite failed: %s", e)
 
     # Vector memory: store interaction snippet
     try:

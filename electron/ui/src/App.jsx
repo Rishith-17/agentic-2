@@ -46,19 +46,30 @@ export default function App() {
       const newTime = new Date().toLocaleTimeString();
       let jarvisResponse = "Action executed successfully.";
       
-      // Attempt to parse the response to give a conversational feel
-      if (res?.steps && res.steps.length > 0) {
+      // Parse the response to give the conversational text
+      if (res?.result?.reply) {
+         jarvisResponse = res.result.reply;
+      } else if (res?.steps && res.steps.length > 0) {
         const lastStep = res.steps[res.steps.length - 1];
         if (lastStep.status === 'error') {
            jarvisResponse = `Error executing directive: ${lastStep.error}`;
-        } else if (res.message) {
-           jarvisResponse = res.message;
         } else if (lastStep.skill) {
-           jarvisResponse = `Module [${lastStep.skill}] completed execution.`;
+           jarvisResponse = `Module [${lastStep.skill}] completed execution without returning text.`;
         }
       }
 
       setCommsHistory(prev => [...prev, { time: newTime, sender: 'JARVIS_CORE', text: jarvisResponse }]);
+      
+      // Play TTS if available
+      if (res?.result?.tts_audio_base64) {
+        try {
+            const audio = new Audio('data:audio/wav;base64,' + res.result.tts_audio_base64);
+            audio.play().catch(e => console.error("Audio play error:", e));
+        } catch(e) {
+            console.error("Audio setup error:", e);
+        }
+      }
+      
     } catch (error) {
       setCommsHistory(prev => [...prev, { time: new Date().toLocaleTimeString(), sender: 'JARVIS_CORE', text: `Critical Failure: ${error.message || "Unknown error"}` }]);
     } finally {
@@ -70,7 +81,7 @@ export default function App() {
     <div className="min-h-screen bg-grid bg-[var(--bg-deep)] text-cyan-100 flex flex-col overflow-hidden relative">
       
       {/* Top HUD Bar */}
-      <header className="flex items-center justify-between p-4 border-b border-cyan-500/20 bg-black/40 backdrop-blur-md relative z-20 shadow-[0_4px_30px_rgba(0,246,255,0.05)]">
+      <header className="flex items-center justify-between p-4 border-b border-cyan-500/20 bg-black/40 backdrop-blur-md relative z-20 shadow-[0_4px_30px_rgba(0,246,255,0.05)]" style={{ WebkitAppRegion: 'drag' }}>
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2 text-xs text-jarvis-teal tracking-widest font-bold">
              <span className="w-2 h-2 rounded-full bg-jarvis-teal animate-pulse" />
@@ -93,10 +104,28 @@ export default function App() {
           <div className="text-[10px] tracking-widest text-cyan-500 font-bold uppercase">
             PROTOCOL: SECURE
           </div>
-          <div className="flex gap-2 text-cyan-500/50">
-            <Minimize2 size={16} className="hover:text-cyan-200 cursor-pointer transition" />
-            <Maximize2 size={16} className="hover:text-cyan-200 cursor-pointer transition" />
-            <X size={16} className="hover:text-rose-400 cursor-pointer transition" />
+          <div className="flex items-center gap-6 pr-2" style={{ WebkitAppRegion: 'no-drag' }}>
+            <button 
+              onClick={() => window.jarvis?.minimize()} 
+              className="text-cyan-400 hover:text-[#00f6ff] transition-all duration-300 drop-shadow-[0_0_8px_rgba(0,246,255,0.4)] hover:drop-shadow-[0_0_12px_rgba(0,246,255,0.8)]"
+              title="Minimize"
+            >
+              <Minimize2 size={18} strokeWidth={2.5} />
+            </button>
+            <button 
+              onClick={() => window.jarvis?.maximize()} 
+              className="text-cyan-400 hover:text-[#00f6ff] transition-all duration-300 drop-shadow-[0_0_8px_rgba(0,246,255,0.4)] hover:drop-shadow-[0_0_12px_rgba(0,246,255,0.8)]"
+              title="Maximize"
+            >
+              <Maximize2 size={18} strokeWidth={2.5} />
+            </button>
+            <button 
+              onClick={() => window.jarvis?.close()} 
+              className="text-cyan-400 hover:text-rose-500 transition-all duration-300 drop-shadow-[0_0_8px_rgba(0,246,255,0.4)] hover:drop-shadow-[0_0_12px_rgba(255,0,0,0.8)]"
+              title="Close"
+            >
+              <X size={22} strokeWidth={2.5} />
+            </button>
           </div>
         </div>
       </header>

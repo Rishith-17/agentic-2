@@ -92,11 +92,13 @@ function showResultCard(type, content, data = {}) {
   const iconMap = {
     weather: '☁️', news: '📰', email: '📧', calendar: '📅',
     memory: '🧠', places: '📍', maps: '🗺️', confirmation: '⚠️', whatsapp: '💬',
+    gmail: '📧', system: '⚙️', search: '🔍', default: '⚡',
   };
   const titleMap = {
     weather: 'Environmental Data', news: 'Global Intel', email: 'Comms Update',
     calendar: 'Schedule Sync', memory: 'Neural Recall', places: 'Proximity Scan',
     maps: 'Navigation Path', confirmation: 'Authorization Required', whatsapp: 'WhatsApp Authorization',
+    gmail: 'Comms Update', system: 'System Control', search: 'Search Result', default: 'System Result',
   };
 
   card.innerHTML = `
@@ -138,11 +140,15 @@ function showResultCard(type, content, data = {}) {
   }
 
   resultOverlay.appendChild(card);
-  if (type !== 'confirmation') {
+
+  // Auto-dismiss after 10 seconds (except confirmation cards)
+  if (type !== 'confirmation' && type !== 'whatsapp') {
+    const dismissDelay = 10000;
+    const fadeDelay    = 800;
     setTimeout(() => {
       card.classList.add('dismissing');
-      setTimeout(() => card.remove(), 800);
-    }, 8000);
+      setTimeout(() => card.remove(), fadeDelay);
+    }, dismissDelay);
   }
   return card;
 }
@@ -375,7 +381,11 @@ async function sendMessage(confirmed = false) {
         showCartSummary(g.chosen_item, g.platform || 'Swiggy');
       }
     } else if (data.skill_type) {
+      // Show result card for known skill types
       showResultCard(data.skill_type, reply, data.skill_result);
+    } else {
+      // Always show a notification card for every command result
+      showResultCard('default', reply);
     }
 
     execState.textContent = 'AWAITING DIRECTIVE';

@@ -191,15 +191,30 @@ class WhatsAppSkill(SkillBase):
                 }
 
         url = f"{base}/send"
-        try:
-            async with httpx.AsyncClient(timeout=45.0) as client:
-                r = await client.post(url, json={"chat_id": jid, "message": message})
-        except httpx.RequestError as e:
+        payload = {"chat_id": jid, "message": message}
+        max_attempts = 2
+        last_error: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                async with httpx.AsyncClient(timeout=45.0) as client:
+                    r = await client.post(url, json=payload)
+                last_error = None
+                break  # success — exit retry loop
+            except httpx.RequestError as e:
+                last_error = e
+                logger.warning("WhatsApp send attempt %d/%d failed: %s", attempt, max_attempts, e)
+                if attempt < max_attempts:
+                    import asyncio
+                    await asyncio.sleep(1.5)  # brief pause before retry
+
+        if last_error is not None:
             return {
                 "message": (
-                    f"WhatsApp bridge is not running. Start it with:\n"
-                    f"```\ncd integrations/jarvis-whatsapp-automation && node index.js\n```\n"
-                    f"Error: {e}"
+                    f"⚠️ **WhatsApp bridge connection failed** (tried {max_attempts} times).\\n\\n"
+                    f"Make sure the bridge is running:\\n"
+                    f"```\\ncd integrations/jarvis-whatsapp-automation && node index.js\\n```\\n"
+                    f"Error: {last_error}"
                 ),
                 "success": False,
             }

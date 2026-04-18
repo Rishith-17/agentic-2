@@ -1,26 +1,28 @@
-"""Presentation generation via auto-slide-creator.vercel.app automation."""
+"""Presentation and Document generation using deep-links to lovelace / API."""
 
 from __future__ import annotations
 
 import logging
-import os
-import platform
-import subprocess
-from pathlib import Path
+import urllib.parse
 from typing import Any
 
-from playwright.async_api import async_playwright
+import httpx
 
 from app.skills.base import SkillBase
 
 logger = logging.getLogger(__name__)
 
+# Fallback API Key for reports
+DEFAULT_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtmYWN1c2FweXl2cmpzZXdzaWF6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjYxNDQyNDQsImV4cCI6MjA4MTcyMDI0NH0.QrvXBvj6eDCjoN1mrVohZkripy4G57R1W394rpcXPy8"
 
 class PresentationSkill(SkillBase):
     name = "presentation"
-    description = "Generate PowerPoint presentations by automating auto-slide-creator.vercel.app."
+    description = "Generate PowerPoint presentations and academic reports."
+    priority = 5
+    keywords = ["ppt", "presentation", "slide", "slides", "academic report", "project report", "documentation"]
 
-    BASE_URL = "https://auto-slide-creator.vercel.app"
+    API_URL = "https://kfacusapyyvrjsewsiaz.supabase.co/functions/v1/jarvis-api"
+    WEB_APP_URL = "https://glide-presentations.lovable.app"
 
     @property
     def input_schema(self) -> dict[str, Any]:
@@ -29,87 +31,95 @@ class PresentationSkill(SkillBase):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["create_presentation", "create_and_send"],
+                    "enum": ["generate_ppt", "generate_report"],
                 },
-                "topic": {"type": "string"},
-                "recipients": {"type": "array", "items": {"type": "string"}},
+                "topic": {"type": "string", "description": "Subject for PPT"},
+                "mode": {"type": "string", "description": "Generation mode (agentic or fast)"},
+                "audience": {"type": "string", "description": "Target audience (for PPT)"},
+                "tone": {"type": "string", "description": "Tone of voice (for PPT)"},
+                "projectTitle": {"type": "string", "description": "Title for report"},
+                "projectDescription": {"type": "string", "description": "Description for report"},
             },
             "required": ["action"],
         }
 
     async def execute(self, action: str, parameters: dict[str, Any], context: dict[str, Any] | None = None) -> dict[str, Any]:
-        topic = parameters.get("topic") or ""
-        if not topic:
-            return {
-                "message": "Please specify a topic for the presentation.",
-                "summary_text": "Please specify a topic for the presentation.",
-            }
+        if action == "generate_ppt":
+            return await self._build_ppt(parameters)
+        elif action == "generate_report":
+            return await self._build_report(parameters)
+        return {"message": f"Unknown action: {action}"}
+
+    async def _build_ppt(self, params: dict[str, Any]) -> dict[str, Any]:
+        topic = params.get("topic") or "General presentation"
+        mode = params.get("mode", "agentic")
+        audience = params.get("audience")
+        tone = params.get("tone")
+
+        logger.info("Opening Auto Slider via deep-link for topic: %s", topic)
+        
+        query_params = {
+            "topic": topic,
+            "autogenerate": "1",
+            "autodownload": "pptx",
+            "mode": mode,
+        }
+        if tone:
+            query_params["tone"] = tone
+        if audience:
+            query_params["audience"] = audience
+
+        url = f"{self.WEB_APP_URL}/?{urllib.parse.urlencode(query_params)}"
+        self._auto_open_url(url)
+        
+        msg = f"Opening Auto Slider for '{topic}' — your presentation will auto-generate and download in 1–3 minutes. Watch the browser. 🪄"
+        
+        return {"message": msg, "skill_type": "presentation"}
+
+    async def _build_report(self, params: dict[str, Any]) -> dict[str, Any]:
+        title = params.get("projectTitle") or "Academic Report"
+        desc = params.get("projectDescription") or ""
+
+        logger.info("Generating Report via API for title: %s", title)
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {DEFAULT_API_KEY}"
+        }
+        payload = {
+            "action": "generate_report",
+            "projectTitle": title,
+            "projectDescription": desc
+        }
 
         try:
-            msg_initial = f"🚀 Starting PPT generation for '{topic}' on your website..."
-            logger.info(msg_initial)
-            
-            async with async_playwright() as p:
-                # Launch browser - headless=True for background work, but False could be helpful for debugging
-                browser = await p.chromium.launch(headless=True)
-                context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.post(self.API_URL, json=payload, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+
+                if not data.get("success"):
+                    raise Exception(data.get("error", "Unknown API error"))
+                
+                self._auto_open_url(self.WEB_APP_URL)
+
+                chapters = data.get("content", {}).get("chapters", [])
+                title_returned = data.get("projectTitle", title)
+
+                msg = (
+                    f"Done! I've successfully generated the academic report on '{title_returned}'. "
+                    f"It contains {len(chapters)} chapters. I have opened {self.WEB_APP_URL} in your browser so you can view it."
                 )
-                page = await context.new_page()
-                
-                # 1. Navigate to the website
-                await page.goto(self.BASE_URL, wait_until="networkidle")
-                
-                # 2. Enter Topic
-                # Try multiple selectors for robustness
-                input_selector = "input.builder-input"
-                await page.wait_for_selector(input_selector, timeout=10000)
-                await page.fill(input_selector, topic)
-                
-                # 3. Trigger Generation (Enter)
-                await page.keyboard.press("Enter")
-                
-                # 4. Wait for it to finish
-                # The 'Export' button appears in the top right when done
-                export_button_selector = "button:has-text('Export')"
-                # Generations can take up to 90 seconds
-                await page.wait_for_selector(export_button_selector, timeout=120000)
-                
-                # 5. Open Export Menu
-                await page.click(export_button_selector)
-                
-                # 6. Click PowerPoint to start download
-                # We need to expect a download object
-                pptx_option_selector = "button:has-text('PowerPoint')"
-                async with page.expect_download() as download_info:
-                    await page.click(pptx_option_selector)
-                
-                download = await download_info.value
-                
-                # 7. Save the file
-                output_dir = Path.home() / "Documents" / "Jarvis_Presentations"
-                output_dir.mkdir(parents=True, exist_ok=True)
-                
-                filename = f"{topic.replace(' ', '_')[:30]}_{os.urandom(2).hex()}.pptx"
-                save_path = output_dir / filename
-                await download.save_as(str(save_path))
-                
-                await browser.close()
 
-            # 8. Auto-open the file
-            if platform.system() == "Windows":
-                os.startfile(save_path)
-            elif platform.system() == "Darwin":
-                subprocess.run(["open", str(save_path)])
-            else:
-                subprocess.run(["xdg-open", str(save_path)])
-
-            msg = f"✅ Done! I've generated your presentation on '{topic}' and opened it for you. You can find it in your Documents/Jarvis_Presentations folder."
-            return {"message": msg, "summary_text": msg, "skill_type": "presentation"}
+                return {"message": msg, "skill_type": "presentation"}
 
         except Exception as e:
-            logger.exception("Website PPT Automation failed")
-            return {
-                "message": f"Darn! I ran into an issue while automating your website: {str(e)[:100]}...",
-                "summary_text": str(e)
-            }
+            logger.exception("Failed to generate Report via Auto Slider API")
+            return {"message": f"Sorry, I failed to create the report: {str(e)}"}
+
+    def _auto_open_url(self, url: str):
+        import webbrowser
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            logger.warning("Failed to open browser for %s: %s", url, e)

@@ -3,14 +3,20 @@ import logging
 from typing import Any, List, Optional
 from pydantic import BaseModel
 
+from app.skills.base import SkillBase
+
 # Initialize logger
 logger = logging.getLogger(__name__)
 
-class WebAgentSkill:
+class WebAgentSkill(SkillBase):
     """
     JARVIS Skill: Web Agent
     Uses browser-use with NVIDIA NIM (LLaMA-3-Vision) to automate browser tasks.
     """
+    name = "web_agent"
+    description = "Automate browser tasks using computer vision."
+    priority = 10
+    keywords = ["browser", "automate", "website", "login", "fill form", "search", "claw", "openclaw"]
 
     def __init__(self):
         # We lazy-load dependencies in execute to handle missing browser-use gracefully
